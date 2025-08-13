@@ -77,8 +77,14 @@ GoFlow2 outputs JSON data with the following structure:
 
 ## Filtering Requirements
 
-- Filter out traffic where `src_addr` is a private/LAN IP address
-- Private IP ranges to filter:
+- Only keep traffic between LAN and WAN (internal-external communication)
+- Filter out:
+  - LAN to LAN traffic (internal network communication)
+  - WAN to WAN traffic (external traffic not involving local network)
+- Keep:
+  - LAN to WAN traffic (upload from internal devices)
+  - WAN to LAN traffic (download to internal devices)
+- Private IP ranges:
   - 10.0.0.0/8 (10.0.0.0 - 10.255.255.255)
   - 172.16.0.0/12 (172.16.0.0 - 172.31.255.255)  
   - 192.168.0.0/16 (192.168.0.0 - 192.168.255.255)

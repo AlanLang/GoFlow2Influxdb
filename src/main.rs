@@ -200,7 +200,11 @@ async fn main() -> Result<()> {
             Ok(flow) => {
                 total_processed += 1;
 
-                if !is_private_ip(&flow.src_addr) {
+                let src_is_private = is_private_ip(&flow.src_addr);
+                let dst_is_private = is_private_ip(&flow.dst_addr);
+                
+                // 只保留内网与外网之间的通讯，过滤掉内网间通讯和外网间通讯
+                if (src_is_private && dst_is_private) || (!src_is_private && !dst_is_private) {
                     filtered_out += 1;
                     continue;
                 }
