@@ -166,7 +166,7 @@ async fn main() -> Result<()> {
             Ok(flow) => {
                 total_processed += 1;
 
-                if is_private_ip(&flow.src_addr) {
+                if !is_private_ip(&flow.src_addr) {
                     filtered_out += 1;
                     continue;
                 }
