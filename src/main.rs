@@ -4,8 +4,9 @@ use futures::stream;
 use influxdb2::{Client, models::DataPoint};
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
-use std::{env, net::Ipv4Addr, str::FromStr};
+use std::{env, net::Ipv4Addr, str::FromStr, time::Duration};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -68,6 +69,8 @@ struct Config {
     goflow2_input_file: String,
     batch_size: usize,
     flush_interval_seconds: u64,
+    retry_attempts: u32,
+    retry_delay_ms: u64,
 }
 
 impl Config {
@@ -85,6 +88,12 @@ impl Config {
             flush_interval_seconds: env::var("FLUSH_INTERVAL_SECONDS")
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()?,
+            retry_attempts: env::var("RETRY_ATTEMPTS")
+                .unwrap_or_else(|_| "3".to_string())
+                .parse()?,
+            retry_delay_ms: env::var("RETRY_DELAY_MS")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()?,
         })
     }
 }
@@ -101,6 +110,31 @@ fn is_private_ip(ip_str: &str) -> bool {
     } else {
         false
     }
+}
+
+async fn write_batch_with_retry(
+    client: &Client,
+    bucket: &str,
+    batch: Vec<DataPoint>,
+    retry_attempts: u32,
+    retry_delay_ms: u64,
+) -> Result<()> {
+    for attempt in 1..=retry_attempts {
+        match client.write(bucket, stream::iter(batch.clone())).await {
+            Ok(_) => {
+                info!("Successfully wrote batch of {} points to InfluxDB", batch.len());
+                return Ok(());
+            }
+            Err(e) => {
+                if attempt == retry_attempts {
+                    return Err(anyhow::anyhow!("Failed to write batch after {} attempts: {}", retry_attempts, e));
+                }
+                warn!("Attempt {}/{} failed: {}. Retrying in {}ms...", attempt, retry_attempts, e, retry_delay_ms);
+                sleep(Duration::from_millis(retry_delay_ms)).await;
+            }
+        }
+    }
+    unreachable!()
 }
 
 fn flow_to_datapoint(flow: &FlowData) -> DataPoint {
@@ -176,19 +210,19 @@ async fn main() -> Result<()> {
 
                 if batch.len() >= config.batch_size {
                     let batch_to_write: Vec<_> = batch.drain(..).collect();
-                    let batch_size = batch_to_write.len();
 
-                    if let Err(e) = client
-                        .write(&config.influxdb_bucket, stream::iter(batch_to_write))
-                        .await
-                    {
+                    if let Err(e) = write_batch_with_retry(
+                        &client,
+                        &config.influxdb_bucket,
+                        batch_to_write,
+                        config.retry_attempts,
+                        config.retry_delay_ms,
+                    ).await {
                         error!("Failed to write batch to InfluxDB: {}", e);
-                    } else {
-                        info!(
-                            "Successfully wrote batch of {} points to InfluxDB",
-                            batch_size
-                        );
                     }
+
+                    // Add delay between batch writes to reduce load
+                    sleep(Duration::from_millis(config.flush_interval_seconds * 1000)).await;
                 }
 
                 if total_processed % 1000 == 0 {
@@ -207,17 +241,14 @@ async fn main() -> Result<()> {
     }
 
     if !batch.is_empty() {
-        let final_batch_size = batch.len();
-        if let Err(e) = client
-            .write(&config.influxdb_bucket, stream::iter(batch))
-            .await
-        {
+        if let Err(e) = write_batch_with_retry(
+            &client,
+            &config.influxdb_bucket,
+            batch,
+            config.retry_attempts,
+            config.retry_delay_ms,
+        ).await {
             error!("Failed to write final batch to InfluxDB: {}", e);
-        } else {
-            info!(
-                "Successfully wrote final batch of {} points to InfluxDB",
-                final_batch_size
-            );
         }
     }
 
